@@ -1,0 +1,17 @@
+{
+ "crop": {
+  "box": [
+   370,
+   2377,
+   1811,
+   2974
+  ],
+  "page": "CatInsc_1_000036"
+ },
+ "crop_status": "corrected",
+ "fields": {},
+ "id": "v1-n2",
+ "source_issue": 31,
+ "updated_at": "2026-10-12T07:49:04+00:00",
+ "updated_by": "CVidalG"
+}
