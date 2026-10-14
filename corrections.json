@@ -142,6 +142,23 @@
   "updated_at": "2026-09-25T16:56:40+00:00",
   "updated_by": "EditaMatevosyan"
  },
+ "v1-n5": {
+  "crop": {
+   "box": [
+    296,
+    414,
+    1850,
+    898
+   ],
+   "page": "CatInsc_1_000038"
+  },
+  "crop_status": "corrected",
+  "fields": {},
+  "id": "v1-n5",
+  "source_issue": 40,
+  "updated_at": "2026-10-14T15:33:30+00:00",
+  "updated_by": "CVidalG"
+ },
  "v10-n16": {
   "crop": null,
   "crop_status": "unreviewed",
