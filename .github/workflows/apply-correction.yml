@@ -51,14 +51,18 @@ jobs:
     steps:
       - name: Choose the route
         id: route
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { owner, repo } = context.repo;
             const issue = context.payload.issue;
-            const prs = await github.rest.pulls.list({
-              owner, repo, state: 'all', head: `${owner}:correction/${issue.number}` });
-            const pr = prs.data[0];
+            // A failed lookup must not block the team: if pull requests are
+            // disabled on the repository, the API answers 404 here.
+            let pr;
+            try {
+              pr = (await github.rest.pulls.list({
+                owner, repo, state: 'all', head: `${owner}:correction/${issue.number}` })).data[0];
+            } catch (e) { core.warning(`pull request lookup failed: ${e.message}`); }
             let route;
             if (pr) route = pr.state === 'open' ? 'update' : 'locked';
             else {
@@ -82,7 +86,7 @@ jobs:
             core.setOutput('pr', pr ? String(pr.number) : '');
             core.setOutput('merged', pr && pr.merged_at ? 'true' : 'false');
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: contains(fromJSON('["direct","propose","update"]'), steps.route.outputs.route)
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -147,7 +151,7 @@ jobs:
 
       - name: Report back on the issue
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           ROUTE: ${{ steps.route.outputs.route }}
           PR: ${{ steps.route.outputs.pr }}
