@@ -10,6 +10,14 @@
 # - GITHUB_TOKEN is minted per run, and the only person who can start a run is
 # someone who signed in to GitHub and filed an issue.
 #
+# Who may publish without review: anyone with write access to this repository
+# (the extended Calfa team). They could push to main anyway, so applying their
+# correction directly opens nothing. Everyone else gets a pull request that an
+# editor reviews against the scan; merging it publishes the correction (see
+# publish-correction.yml). Once a pull request exists for an issue, the issue
+# follows it whoever edits it: open, an edit updates it; merged or closed, edits
+# are not applied.
+#
 # The workflow REFUSES rather than guesses. A body it cannot parse, an unknown
 # notice, an unknown field, a bad crop box: it says so on the issue and stops.
 # A wrong commit to the corpus is far more expensive than a rejected issue.
@@ -22,6 +30,11 @@ on:
 permissions:
   contents: write
   issues: write
+  pull-requests: write
+
+env:
+  # Corrections one outside contributor may have awaiting review at once.
+  LIMIT: 50
 
 jobs:
   apply:
@@ -32,70 +45,180 @@ jobs:
     # only audience that matters here. The workflow applies the label itself.
     if: contains(github.event.issue.body, '<!-- correction:begin -->')
     runs-on: ubuntu-latest
-    # One run at a time: two issues applied in parallel would race on the same
-    # branch and one commit would be lost.
-    concurrency: apply-correction
+    # No concurrency group: GitHub keeps only the newest pending run of a group
+    # and cancels the others, which would drop corrections filed in a burst.
+    # Direct commits retry on a moved main instead.
     steps:
-      - uses: actions/checkout@v4
+      - name: Choose the route
+        id: route
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const prs = await github.rest.pulls.list({
+              owner, repo, state: 'all', head: `${owner}:correction/${issue.number}` });
+            const pr = prs.data[0];
+            let route;
+            if (pr) route = pr.state === 'open' ? 'update' : 'locked';
+            else {
+              // The account that wrote this version of the body: the author on
+              // `opened`, whoever edited it on `edited`.
+              let perm = 'none';
+              try {
+                perm = (await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner, repo, username: context.payload.sender.login })).data.permission;
+              } catch (e) { core.info(`permission lookup failed: ${e.message}`); }
+              if (['admin', 'write'].includes(perm)) route = 'direct';
+              else {
+                const waiting = await github.paginate(github.rest.issues.listForRepo, {
+                  owner, repo, creator: issue.user.login, labels: 'awaiting-review',
+                  state: 'open', per_page: 100 });
+                route = waiting.length >= Number(process.env.LIMIT) ? 'held' : 'propose';
+              }
+            }
+            core.info(`route: ${route}`);
+            core.setOutput('route', route);
+            core.setOutput('pr', pr ? String(pr.number) : '');
+            core.setOutput('merged', pr && pr.merged_at ? 'true' : 'false');
 
-      - name: Apply the correction
+      - uses: actions/checkout@v4
+        if: contains(fromJSON('["direct","propose","update"]'), steps.route.outputs.route)
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Validate the correction
         id: apply
+        if: contains(fromJSON('["direct","propose","update"]'), steps.route.outputs.route)
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_USER: ${{ github.event.issue.user.login }}
           ISSUE_NUM: ${{ github.event.issue.number }}
+          MODE: ${{ steps.route.outputs.route == 'direct' && 'direct' || 'propose' }}
         run: python3 .github/scripts/apply_correction.py
 
-      - name: Commit
-        if: steps.apply.outputs.changed == 'true'
-        # Everything reaches git through the environment rather than through
-        # ${{ }} interpolation into the shell: an issue body is written by the
-        # public and must never be able to become a command.
+      # Everything reaches git through the environment rather than through
+      # ${{ }} interpolation into the shell: an issue body is written by the
+      # public and must never be able to become a command.
+      - name: Commit to main
+        if: steps.route.outputs.route == 'direct' && steps.apply.outputs.changed == 'true'
         env:
-          SUMMARY: ${{ steps.apply.outputs.summary }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_USER: ${{ github.event.issue.user.login }}
           ISSUE_NUM: ${{ github.event.issue.number }}
-          LOGIN: ${{ github.event.issue.user.login }}
-          UID: ${{ github.event.issue.user.id }}
+          MODE: direct
+          SUMMARY: ${{ steps.apply.outputs.summary }}
+          AUTHOR_ID: ${{ github.event.issue.user.id }}
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name  "inscriptions-bot"
           git config user.email "actions@github.com"
-          git add corrections/ corrections.json
-          git commit -F - <<EOF
-          $SUMMARY
+          printf '%s\n\nCloses #%s\n\nCo-authored-by: %s <%s+%s@users.noreply.github.com>\n' \
+            "$SUMMARY" "$ISSUE_NUM" "$ISSUE_USER" "$AUTHOR_ID" "$ISSUE_USER" > "$RUNNER_TEMP/msg"
+          for attempt in 1 2 3 4 5; do
+            git add corrections/ corrections.json
+            git diff --cached --quiet || git commit -q -F "$RUNNER_TEMP/msg"
+            git push -q origin HEAD:"$BRANCH" && exit 0
+            # Another correction landed first: start again from it.
+            sleep $((attempt * 5))
+            git fetch -q origin "$BRANCH"
+            git reset -q --hard FETCH_HEAD
+            python3 .github/scripts/apply_correction.py
+          done
+          echo "::error::main kept moving; the correction was not pushed."
+          exit 1
 
-          Closes #$ISSUE_NUM
-
-          Co-authored-by: $LOGIN <$UID+$LOGIN@users.noreply.github.com>
-          EOF
-          git push
+      - name: Push the proposal for review
+        if: steps.route.outputs.route != 'direct' && steps.apply.outputs.changed == 'true'
+        env:
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_USER: ${{ github.event.issue.user.login }}
+          SUMMARY: ${{ steps.apply.outputs.summary }}
+          AUTHOR_ID: ${{ github.event.issue.user.id }}
+        run: |
+          git config user.name  "inscriptions-bot"
+          git config user.email "actions@github.com"
+          printf '%s\n\nProposed in #%s\n\nCo-authored-by: %s <%s+%s@users.noreply.github.com>\n' \
+            "$SUMMARY" "$ISSUE_NUM" "$ISSUE_USER" "$AUTHOR_ID" "$ISSUE_USER" > "$RUNNER_TEMP/msg"
+          git checkout -q -B "correction/$ISSUE_NUM"
+          git add corrections/
+          git commit -q -F "$RUNNER_TEMP/msg"
+          git push -q --force origin "correction/$ISSUE_NUM"
 
       - name: Report back on the issue
         if: always()
         uses: actions/github-script@v7
         env:
+          ROUTE: ${{ steps.route.outputs.route }}
+          PR: ${{ steps.route.outputs.pr }}
+          MERGED: ${{ steps.route.outputs.merged }}
           CHANGED: ${{ steps.apply.outputs.changed }}
           MESSAGE: ${{ steps.apply.outputs.message }}
+          SUMMARY: ${{ steps.apply.outputs.summary }}
+          NOTICE: ${{ steps.apply.outputs.id }}
+          PUSHED: ${{ job.status }}
         with:
           script: |
-            const ok = process.env.CHANGED === 'true';
-            const msg = process.env.MESSAGE ||
-              'The correction block could not be read. Nothing was changed.';
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue, num = issue.number;
+            const env = process.env;
+            const say = body => github.rest.issues.createComment({
+              owner, repo, issue_number: num, body });
+            const label = labels => github.rest.issues.addLabels({
+              owner, repo, issue_number: num, labels }).catch(() => {});
+            const unlabel = name => github.rest.issues.removeLabel({
+              owner, repo, issue_number: num, name }).catch(() => {});
             // The interface cannot set this label (GitHub drops `labels=` for
             // anyone without triage rights), so the workflow sets it - which
             // also makes every correction issue filterable after the fact.
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number, labels: ['correction'] })
-              .catch(() => {});
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number, body: msg });
-            if (ok) {
-              await github.rest.issues.update({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.issue.number, state: 'closed' });
-            } else {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.issue.number, labels: ['needs-review'] });
+            await label(['correction']);
+
+            if (env.ROUTE === 'locked') {
+              return say(env.MERGED === 'true'
+                ? `This correction was reviewed and published in #${env.PR}. Later edits to this issue are not applied: propose further changes from the interface, which opens a new issue.`
+                : `This correction was declined in #${env.PR}. Later edits to this issue are not applied: propose it again from the interface if needed.`);
+            }
+            if (env.ROUTE === 'held') {
+              await label(['on-hold']);
+              return say(`:pause_button: **Not yet submitted for review.** You already have ${env.LIMIT} corrections awaiting review. Once some have been reviewed, edit the title of this issue (any change will do) to submit this one.`);
+            }
+            if (env.CHANGED !== 'true' || env.PUSHED !== 'success') {
+              await label(['needs-review']);
+              return say(env.MESSAGE && env.CHANGED !== 'true' ? env.MESSAGE
+                : ':x: **Not applied.** The correction could not be recorded. Nothing was changed; a maintainer has been flagged.');
+            }
+            await unlabel('needs-review');
+
+            if (env.ROUTE === 'direct') {
+              await say(env.MESSAGE);
+              return github.rest.issues.update({ owner, repo, issue_number: num, state: 'closed' });
+            }
+
+            await unlabel('on-hold');
+            await label(['awaiting-review']);
+            if (env.ROUTE === 'update') {
+              await github.rest.issues.createComment({ owner, repo, issue_number: Number(env.PR),
+                body: `@${issue.user.login} edited #${num}: this pull request now carries the new version. Review the diff again before merging.` });
+              return say(`${env.MESSAGE} Your edit replaced the version under review in #${env.PR}.`);
+            }
+            const branch = `correction/${num}`;
+            try {
+              const pr = await github.rest.pulls.create({ owner, repo, head: branch,
+                base: context.payload.repository.default_branch, title: env.SUMMARY,
+                body: [
+                  `Proposed in #${num} by @${issue.user.login} from the proofreading interface. The format was validated automatically: known notice, correctable fields, balanced brackets, crop inside the page.`,
+                  '',
+                  '**Check it against the scan before merging.** Merging publishes it on the site and records you as its approver; closing declines it.',
+                  '',
+                  `Notice: https://epigraphy.calfa.fr/#/notice/${env.NOTICE}`,
+                  '',
+                  `Closes #${num}`,
+                ].join('\n') });
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.data.number,
+                labels: ['correction'] }).catch(() => {});
+              return say(`${env.MESSAGE} Review: #${pr.data.number}.`);
+            } catch (e) {
+              // Most likely "Allow GitHub Actions to create pull requests" is off.
+              core.warning(`could not open the pull request: ${e.message}`);
+              return say(`${env.MESSAGE} It is waiting on branch \`${branch}\` for an editor to open the review.`);
             }

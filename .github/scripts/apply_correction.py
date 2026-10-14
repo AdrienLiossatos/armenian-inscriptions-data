@@ -13,6 +13,12 @@ outside the page, or a transcription whose diplomatic notation is unbalanced all
 stop the run with an explanation. The corpus is the product; a rejected issue
 costs one comment, a wrong commit costs a reader's trust in every record.
 
+MODE decides where the result goes. "direct" (a member of the team, who could
+push to the repository anyway) writes the notice file and rebuilds the
+aggregate, and the workflow commits both to main. "propose" (anyone else) writes
+only the notice file, and the workflow puts it in a pull request for an editor
+to review; the aggregate is rebuilt once that pull request is merged.
+
 Nothing here rewrites the machine extraction. notices.jsonl is untouched and
 corrections/<id>.json only ever shadows it, so "what did the model produce"
 stays answerable forever.
@@ -25,6 +31,8 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from publish_corrections import write_aggregate
 
 BLOCK = re.compile(r"<!--\s*correction:begin\s*-->(.*?)<!--\s*correction:end\s*-->", re.S)
 FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -57,6 +65,7 @@ def main() -> int:
     body = os.environ.get("ISSUE_BODY") or ""
     user = os.environ.get("ISSUE_USER") or "unknown"
     num = os.environ.get("ISSUE_NUM") or "?"
+    mode = os.environ.get("MODE") or "direct"
 
     m = BLOCK.search(body)
     if not m:
@@ -79,7 +88,7 @@ def main() -> int:
         fail("notices.jsonl is missing from this repository.")
     notice = None
     for line in notices.read_text(encoding="utf-8").splitlines():
-        if line.strip() and f'"id": "{nid}"' in line or f'"id":"{nid}"' in line:
+        if line.strip() and (f'"id": "{nid}"' in line or f'"id":"{nid}"' in line):
             n = json.loads(line)
             if n.get("id") == nid:
                 notice = n
@@ -149,33 +158,35 @@ def main() -> int:
             rec.pop("crop", None)
     if status:
         rec["review_status"] = status
+    # An approval covers the values the reviewer saw. Any later change to the
+    # notice needs its own, so the old one is dropped rather than carried over.
+    for k in ("approved_by", "approved_at", "approved_in"):
+        rec.pop(k, None)
     rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rec["updated_by"] = user
     rec["source_issue"] = int(num) if str(num).isdigit() else num
     path.write_text(json.dumps(rec, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
                     encoding="utf-8")
 
-    # One aggregate beside the per-notice files. The per-notice layout is what
-    # keeps two reviewers from conflicting, but a browser cannot fetch 7592
-    # little files - so the site reads this one and sees a correction the moment
-    # it is applied, instead of waiting for someone to redeploy the site.
-    agg = {}
-    for f in sorted((Path("corrections")).glob("*.json")):
-        agg[f.stem] = json.loads(f.read_text(encoding="utf-8"))
-    Path("corrections.json").write_text(
-        json.dumps(agg, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
-        encoding="utf-8")
+    # The per-notice layout keeps two reviewers from conflicting; the aggregate
+    # is what the site reads. A proposal leaves it alone: it is rebuilt when the
+    # pull request is merged, so pending proposals never conflict over it.
+    if mode == "direct":
+        write_aggregate()
 
     what = ", ".join([*sorted(fields),
                       *(["crop"] if crop else []),
                       *([f"crop {crop_status}"] if crop_status else []),
                       *([f"marked {status}"] if status else [])]) or "review"
 
-    out(changed="true",
-        summary=f"correction: {nid} ({what})",
-        message=f":white_check_mark: Applied to `corrections/{nid}.json` - **{what}**, "
-                f"credited to @{user}. The machine extraction is unchanged and "
-                f"remains visible beside your correction.")
+    if mode == "direct":
+        message = (f":white_check_mark: Applied to `corrections/{nid}.json` - **{what}**, "
+                   f"credited to @{user}. The machine extraction is unchanged and "
+                   f"remains visible beside your correction.")
+    else:
+        message = (f":hourglass: Validated - **{what}** on `{nid}`. An editor will now review "
+                   f"it; it is published, credited to @{user}, once approved.")
+    out(changed="true", id=nid, summary=f"correction: {nid} ({what})", message=message)
     return 0
 
 

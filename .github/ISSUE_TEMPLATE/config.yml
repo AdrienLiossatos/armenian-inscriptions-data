@@ -3,8 +3,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Correct an inscription notice
-    url: https://calfa-co.github.io/armenian-inscriptions-website/
+    url: https://epigraphy.calfa.fr/
     about: >-
-      Open the proofreading interface, find the notice, edit it, and press
-      "Propose this notice on GitHub". The correction is filed here as an issue
-      and applied automatically.
+      Open the site, find the notice, press Edit, then "Send to GitHub". The
+      correction is filed here as an issue, checked automatically, and
+      published once an editor has reviewed it.
