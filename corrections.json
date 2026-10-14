@@ -572,5 +572,22 @@
   "source_issue": 21,
   "updated_at": "2026-09-25T16:48:05+00:00",
   "updated_by": "EditaMatevosyan"
+ },
+ "v9-n58": {
+  "crop": {
+   "box": [
+    285,
+    277,
+    1830,
+    802
+   ],
+   "page": "CatInsc_9_000051"
+  },
+  "crop_status": "corrected",
+  "fields": {},
+  "id": "v9-n58",
+  "source_issue": 39,
+  "updated_at": "2026-10-14T13:00:51+00:00",
+  "updated_by": "CVidalG"
  }
 }
